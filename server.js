@@ -12,6 +12,7 @@ const pkg = require('./package.json');
 
 const PORT = process.env.PORT || 4488;
 const HOST = '127.0.0.1'; // localhost only — this server executes arbitrary shell code
+const SERVER_START_TIME = Date.now();
 const STOCK_DEFAULT_NOTES_DIR = path.join(__dirname, 'notes');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -26,8 +27,9 @@ function isUsableDir(p) {
 // Two independent notions of "notes folder":
 // - NOTES_DIR: the current working folder — set via the sidebar's Open button,
 //   remembered, and reopened automatically next launch as long as it still exists.
-// - DEFAULT_NOTES_DIR: the fallback folder (customizable in Settings) used only
-//   the first time the app runs, or if the remembered working folder is gone.
+// - DEFAULT_NOTES_DIR: the fallback folder used only the first time the app
+//   runs, or if the remembered working folder is gone. Settings can reset the
+//   current working folder back to this value, but not change it.
 const savedConfig = configStore.load();
 let DEFAULT_NOTES_DIR = isUsableDir(savedConfig.defaultNotesFolder) ? savedConfig.defaultNotesFolder : STOCK_DEFAULT_NOTES_DIR;
 let NOTES_DIR = isUsableDir(savedConfig.notesFolder) ? savedConfig.notesFolder : DEFAULT_NOTES_DIR;
@@ -88,10 +90,10 @@ const server = http.createServer(async (req, res) => {
         version: pkg.version,
         license: pkg.license,
         author: pkg.author,
+        serverStartTime: SERVER_START_TIME,
         notesFolder: NOTES_DIR,
         isDefaultFolder: NOTES_DIR === DEFAULT_NOTES_DIR,
         defaultNotesFolder: DEFAULT_NOTES_DIR,
-        isDefaultNotesFolderCustom: DEFAULT_NOTES_DIR !== STOCK_DEFAULT_NOTES_DIR,
         appDataDir: configStore.getAppDataDir(),
         isDefaultAppDataDir: configStore.isDefaultAppDataDir(),
       });
@@ -139,27 +141,6 @@ const server = http.createServer(async (req, res) => {
       NOTES_DIR = path.resolve(body.path);
       configStore.update({ notesFolder: NOTES_DIR });
       return sendJson(res, 200, { path: NOTES_DIR });
-    }
-
-    // Default (fallback) folder — only used on first run, or if the remembered
-    // working folder above no longer exists. Configured from Settings.
-    if (p === '/api/default-notes-folder/browse' && req.method === 'POST') {
-      const selected = await browseForFolder(DEFAULT_NOTES_DIR);
-      return sendJson(res, 200, { path: selected });
-    }
-
-    if (p === '/api/default-notes-folder' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
-      if (!isUsableDir(body.path)) return sendJson(res, 400, { error: 'That folder does not exist.' });
-      DEFAULT_NOTES_DIR = path.resolve(body.path);
-      configStore.update({ defaultNotesFolder: DEFAULT_NOTES_DIR });
-      return sendJson(res, 200, { path: DEFAULT_NOTES_DIR });
-    }
-
-    if (p === '/api/default-notes-folder/reset' && req.method === 'POST') {
-      DEFAULT_NOTES_DIR = STOCK_DEFAULT_NOTES_DIR;
-      configStore.update({ defaultNotesFolder: undefined });
-      return sendJson(res, 200, { path: DEFAULT_NOTES_DIR });
     }
 
     if (p === '/api/notes' && req.method === 'GET') {

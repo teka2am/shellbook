@@ -24,19 +24,23 @@ function showToast(message, type = 'success') {
 let currentFile = null;
 let currentItems = null; // in-memory editable model for the open note
 let currentNotesFolder = null; // absolute path of the active notes folder
+let defaultNotesFolder = null; // fallback folder the "reset" button restores
+let serverStartTime = 0; // used to scope status indicators to executions from this server session only
 
 // ---- meta (version, license, author) + notes folders ----
 // Two independent notions of "notes folder":
 // - current working folder: set via the sidebar's Open button, remembered and
-//   reopened automatically next launch as long as it still exists.
-// - default folder (Settings): a fallback used only the first time shellbook
-//   runs, or if the remembered working folder above is missing.
+//   reopened automatically next launch as long as it still exists. Also shown
+//   (read-only, with a reset-to-default button) in Settings.
+// - default folder: a fallback used only the first time shellbook runs, or if
+//   the remembered working folder above is missing.
 async function loadMeta() {
   const meta = await fetch('/api/meta').then((r) => r.json());
   document.getElementById('app-version').textContent = `v${meta.version}`;
   document.getElementById('header-meta').textContent = `${meta.license} License · ${meta.author}`;
+  serverStartTime = meta.serverStartTime || 0;
+  defaultNotesFolder = meta.defaultNotesFolder;
   updateCurrentFolderInfo(meta.notesFolder, meta.isDefaultFolder);
-  updateDefaultFolderInfo(meta.defaultNotesFolder, meta.isDefaultNotesFolderCustom);
   updateAppDataFolderInfo(meta.appDataDir, meta.isDefaultAppDataDir);
 }
 
@@ -45,11 +49,9 @@ function updateCurrentFolderInfo(folderPath, isDefault) {
   const label = document.getElementById('notes-folder-label');
   label.textContent = isDefault ? `${folderPath} (default)` : folderPath;
   label.title = folderPath;
-}
 
-function updateDefaultFolderInfo(folderPath, isCustom) {
   document.getElementById('settings-notes-folder-label').textContent = folderPath;
-  document.getElementById('settings-notes-folder-reset-btn').classList.toggle('hidden', !isCustom);
+  document.getElementById('settings-notes-folder-reset-btn').classList.toggle('hidden', isDefault);
 }
 
 function updateAppDataFolderInfo(folderPath, isDefault) {
@@ -92,27 +94,17 @@ settingsModal.addEventListener('click', (e) => {
   if (e.target === settingsModal) closeSettings();
 });
 
-document.getElementById('settings-notes-folder-browse-btn').addEventListener('click', async () => {
-  try {
-    const browsed = await fetch('/api/default-notes-folder/browse', { method: 'POST' }).then(assertOk).then((r) => r.json());
-    if (!browsed.path) return; // user cancelled the dialog
-    const result = await fetch('/api/default-notes-folder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: browsed.path }),
-    }).then(assertOk).then((r) => r.json());
-    updateDefaultFolderInfo(result.path, true);
-    showToast(`Default notes folder set to "${result.path}"`);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-});
-
 document.getElementById('settings-notes-folder-reset-btn').addEventListener('click', async () => {
   try {
-    const result = await fetch('/api/default-notes-folder/reset', { method: 'POST' }).then(assertOk).then((r) => r.json());
-    updateDefaultFolderInfo(result.path, false);
-    showToast('Default notes folder reset to default');
+    const meta = await fetch('/api/notes-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: defaultNotesFolder }),
+    }).then(assertOk).then((r) => r.json());
+    updateCurrentFolderInfo(meta.path, true);
+    currentFile = null;
+    await loadNoteList();
+    showToast('Notes folder reset to default');
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -148,8 +140,8 @@ document.getElementById('clear-app-data-btn').addEventListener('click', async ()
   if (!confirm('Reset all app settings (app data folder, current working folder, and default notes folder) back to defaults? Your notes are never touched.')) return;
   try {
     const result = await fetch('/api/app-data/clear', { method: 'POST' }).then(assertOk).then((r) => r.json());
+    defaultNotesFolder = result.defaultNotesFolder;
     updateCurrentFolderInfo(result.notesFolder, true);
-    updateDefaultFolderInfo(result.defaultNotesFolder, false);
     updateAppDataFolderInfo(result.appDataDir, true);
     currentFile = null;
     await loadNoteList();
@@ -416,11 +408,22 @@ async function loadNoteList(selectFile) {
   notes.forEach(({ file, path }) => {
     const item = document.createElement('div');
     item.className = 'note-item';
-    item.textContent = file;
+    item.dataset.file = file;
     item.title = path;
     item.addEventListener('click', () => selectNote(file));
+
+    const dot = document.createElement('span');
+    dot.className = 'status-dot note-status-dot';
+    item.appendChild(dot);
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'note-name';
+    nameSpan.textContent = file;
+    item.appendChild(nameSpan);
+
     noteListItemsEl.appendChild(item);
   });
+  updateStatusIndicators();
   markActiveInList(selectFile || (files.includes(currentFile) ? currentFile : files[0]));
   if (!files.length) {
     currentFile = null;
@@ -853,21 +856,47 @@ document.getElementById('save-as-btn').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('rename-note-btn').addEventListener('click', async () => {
-  let newName = prompt('Rename note to:', currentFile);
-  if (!newName || newName === currentFile) return;
-  if (!newName.toLowerCase().endsWith('.md')) newName += '.md';
-  try {
-    await fetch(`/api/notes/${encodeURIComponent(currentFile)}/rename`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ newName }),
-    }).then(assertOk);
-    await loadNoteList(newName);
-    showToast(`Renamed to "${newName}"`);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
+currentFilenameEl.addEventListener('click', () => {
+  if (!currentFile) return;
+  const original = currentFile;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'current-filename';
+  input.className = 'filename-input';
+  input.value = original;
+  currentFilenameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (commit) => {
+    if (settled) return;
+    settled = true;
+    input.replaceWith(currentFilenameEl);
+
+    if (!commit) return;
+    let newName = input.value.trim();
+    if (!newName || newName === original) return;
+    if (!newName.toLowerCase().endsWith('.md')) newName += '.md';
+    try {
+      await fetch(`/api/notes/${encodeURIComponent(original)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newName }),
+      }).then(assertOk);
+      await loadNoteList(newName);
+      showToast(`Renamed to "${newName}"`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
 });
 
 document.getElementById('delete-note-btn').addEventListener('click', async () => {
@@ -1050,6 +1079,34 @@ function renderProcTable() {
   runningBadge.textContent = String(runningCount);
   runningBadge.classList.toggle('hidden', runningCount === 0);
   updateSortIndicators();
+  updateStatusIndicators();
+}
+
+function computeAggregateStatus(execs) {
+  if (execs.some((ex) => ex.status === 'running')) return 'running';
+  if (execs.some((ex) => ex.status === 'failed')) return 'failed';
+  if (execs.some((ex) => ex.status === 'success')) return 'success';
+  return ''; // grey — nothing, or only killed executions
+}
+
+function updateStatusIndicators() {
+  const sessionExecs = latestExecs.filter((ex) => ex.startedAt >= serverStartTime);
+
+  const globalDot = document.getElementById('session-status-dot');
+  if (globalDot) globalDot.className = `status-dot ${computeAggregateStatus(sessionExecs)}`.trim();
+
+  const byFile = new Map();
+  sessionExecs.forEach((ex) => {
+    if (!byFile.has(ex.noteFile)) byFile.set(ex.noteFile, []);
+    byFile.get(ex.noteFile).push(ex);
+  });
+
+  document.querySelectorAll('#note-list-items .note-item').forEach((item) => {
+    const dot = item.querySelector('.note-status-dot');
+    if (!dot) return;
+    const status = computeAggregateStatus(byFile.get(item.dataset.file) || []);
+    dot.className = `status-dot note-status-dot ${status}`.trim();
+  });
 }
 
 function updateSortIndicators() {
